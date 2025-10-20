@@ -1,0 +1,362 @@
+# PROMPTS - FEATURE VOTING SYSTEM PROJECT
+
+## Session 1: Backend Architecture
+
+### Prompt 1
+I need to build a feature voting system. Before we code, read @voting-feature.md and @development-guideline.md.
+
+After reading, break down the architecture layers we need - backend (Clean Architecture), frontend (Atomic Design), and mobile. I want to understand dependencies between layers before we start.
+
+### Prompt 2
+Looking at the requirements, I'm starting with backend using Clean Architecture because the domain layer has zero dependencies - we can build everything else around it.
+
+Create the domain layer with Feature entity that validates itself (title max 200 chars, description required). Also create Vote as a value object, not just a count - we need to track individual votes with user_identifier to prevent duplicates at the domain level. Add a DuplicateVoteError exception.
+
+Keep it pure Python - no framework imports.
+
+### Prompt 2.1 (question)
+Quick question on the Vote value object - should I store the timestamp when the vote was cast? Could be useful for analytics later, but not sure if that's domain logic or infrastructure concern.
+
+What's the clean architecture approach here?
+
+### Prompt 3
+Now application layer - the use cases that orchestrate domain logic.
+
+Create: CreateFeatureUseCase, ListFeaturesUseCase, GetFeatureUseCase, UpvoteFeatureUseCase.
+
+For UpvoteFeature, check if user already voted first, then create vote and increment count. If duplicate, raise DuplicateVoteError.
+
+Define repository interfaces (IFeatureRepository, IVoteRepository) - abstract base classes only. Use cases depend on interfaces, not implementations. This is dependency inversion from SOLID.
+
+Also create DTOs for input/output of each use case.
+
+### Prompt 3.1 (iteration)
+Wait, looking at the use cases - ListFeaturesUseCase needs sorting. Users will want "most voted" or "newest first".
+
+Add a SortBy enum (VOTES, CREATED_AT) and Order enum (ASC, DESC) as parameters to ListFeaturesUseCase. Update IFeatureRepository interface to support find_all(sort_by, order).
+
+### Prompt 3.2 (technical question)
+Thinking about the repository methods - should these be async since we're using asyncpg? Or keep them sync in the interface and let the implementation handle async?
+
+I'm leaning towards async in the interface to be explicit about I/O operations. Thoughts?
+
+### Prompt 4
+Infrastructure layer - this is where we touch PostgreSQL.
+
+Create SQLAlchemy models (FeatureModel, VoteModel) with proper relationships. Use UUIDs for IDs. Add unique constraint on (feature_id, user_identifier) in votes table - prevents duplicates at DB level too.
+
+Implement concrete repositories that convert between SQLAlchemy models and domain entities. This adapter pattern keeps domain clean.
+
+Setup async database connection with asyncpg driver. Create a get_db_session dependency for FastAPI.
+
+### Prompt 4.1 (reviewing output)
+Looking at the SQLAlchemy models you created - the relationship setup looks good, but I'm seeing you used backref. Should we use back_populates instead? It's more explicit and recommended in SQLAlchemy 2.0.
+
+Also, can you add indexes on created_at and votes_count? We're sorting by these fields frequently.
+
+### Prompt 5
+Presentation layer - expose via FastAPI.
+
+Create Pydantic schemas for request/response validation with examples for Swagger.
+
+Routes:
+- POST /api/v1/features (create)
+- GET /api/v1/features?sort_by=votes&order=desc (list with query params)
+- GET /api/v1/features/{id} (get single)
+- POST /api/v1/features/{id}/vote (upvote with user_identifier in body)
+
+Setup dependency injection for use cases. Configure CORS for web/mobile. Add /health endpoint.
+
+### Prompt 5.1 (bug fix)
+I'm looking at the error handling - you're returning 500 for DuplicateVoteError. That's wrong. Duplicate vote isn't a server error, it's a conflict.
+
+Update error handlers:
+- DuplicateVoteError → 409 Conflict
+- FeatureNotFoundError → 404 Not Found  
+- Validation errors → 422 Unprocessable Entity
+- Only 500 for actual unexpected errors
+
+Add proper error response schemas so frontend knows what to expect.
+
+### Prompt 6
+Create backend Dockerfile with Python 3.11 slim. Use multi-stage build for smaller image.
+
+Install dependencies first (layer caching), then copy code. Run alembic upgrade head before uvicorn starts so migrations run automatically.
+
+Create requirements.txt with: fastapi, uvicorn, sqlalchemy[asyncio], asyncpg, alembic, pydantic-settings.
+
+Also create .env.example with DATABASE_URL and CORS_ORIGINS.
+
+## Session 2: Frontend Development
+
+### Prompt 7
+Moving to Next.js 14 frontend. I'm using App Router (not Pages) because it's the modern approach with better layouts and server components support.
+
+Initialize with TypeScript strict mode, Tailwind, and shadcn/ui. Run shadcn init to setup components.json.
+
+Install these shadcn components: button, card, input, textarea, badge, toast. These are our atoms.
+
+Create folder structure following Atomic Design: components/atoms, molecules, organisms, templates, and app/ for pages.
+
+### Prompt 7.1 (validation question)
+Quick check - with App Router, should I use client components for everything interactive, or can some of this be server components?
+
+I'm thinking FeatureList could be a server component that fetches initial data, then client components for voting. Does that sound right architecturally?
+
+### Prompt 8
+Creating molecules - composed components with specific logic.
+
+FeatureCard: Takes Feature prop, displays in shadcn Card with title, description (truncated to 2 lines), author badge, vote count, and VoteButton.
+
+VoteButton: Shows vote count with arrow-up icon. On click, calls API and implements optimistic updates - increment immediately, rollback if API fails. Disable during loading to prevent double-clicks.
+
+FeatureForm: Use react-hook-form + zod. Validation: title 5-200 chars, description 10-2000 chars, author 2-100 chars. Trim whitespace. Show errors below fields. Clear form on success.
+
+### Prompt 8.1 (UX improvement)
+The FeatureCard description truncation - we should use CSS line-clamp instead of JS substring. It's cleaner and handles different screen sizes better.
+
+Update FeatureCard to use: `className="line-clamp-2"` on description paragraph.
+
+Also add a subtle hover effect on the card - scale-105 transform with transition. Makes it feel more interactive.
+
+### Prompt 9
+Organisms - complex components with state management.
+
+FeatureList: Fetches features on mount. Displays in responsive grid (1 col mobile, 2 tablet, 3 desktop). Add dropdown for sorting (Most Voted, Newest). Show loading skeleton while fetching. Empty state with message and create button when no features.
+
+Header: Nav bar with app name and "Create Feature" button that opens dialog.
+
+Use radix-ui toast for notifications (success/error messages).
+
+### Prompt 9.1 (late discovery)
+Hmm, testing the create flow and realized - when someone creates a feature, it doesn't show up in the list immediately unless they refresh.
+
+Should I refetch the entire list after creation, or just add the new feature to local state optimistically? What's better for UX vs code cleanliness?
+
+### Prompt 10
+API client in lib/api.ts. Using native fetch - no need for axios dependency.
+
+Base URL from NEXT_PUBLIC_API_URL env. Create typed functions: createFeature, listFeatures, getFeature, voteFeature. All return Promise<T>.
+
+Error handling: distinguish network errors (can't reach server) vs 4xx (show detail message) vs 5xx (generic error). FastAPI returns {detail: "message"} format.
+
+### Prompt 10.1 (debugging)
+Testing the API client - getting CORS errors. The backend needs to allow credentials and the frontend origin.
+
+Update backend CORS config:
+- allow_origins: ["http://localhost:3000"]
+- allow_credentials: True
+- allow_methods: ["*"]
+- allow_headers: ["*"]
+
+### Prompt 11
+Create pages with App Router:
+
+app/page.tsx: Home with FeatureList and create dialog
+app/features/[id]/page.tsx: Feature detail page (fetch feature server-side, show full description)
+app/layout.tsx: Root layout with Header and Toaster provider
+
+Use loading.tsx and error.tsx for loading/error states.
+
+### Prompt 11.1 (reviewing output)
+Looked at the pages - nice structure. One thing though: the detail page is fetching server-side but then the vote button needs client interaction. 
+
+Is the pattern to have a server component wrapper that fetches data and passes it to a client component for interactivity? Want to make sure I'm using App Router correctly here.
+
+### Prompt 12
+Frontend Dockerfile with Node 18 alpine. Multi-stage:
+- Stage 1: Install dependencies
+- Stage 2: Build (next build)  
+- Stage 3: Production (next start)
+
+Expose 3000. Pass NEXT_PUBLIC_API_URL as build arg.
+
+## Session 3: Native iOS App
+
+### Prompt 13
+For mobile, I'm going native iOS with Swift/SwiftUI instead of React Native. Reasons: shows I can work beyond JS ecosystem, better performance, truly native iOS experience, and demonstrates I can architect across different paradigms.
+
+Using MVVM pattern (similar separation of concerns as backend).
+
+Create project structure:
+- Models/ (data structures)
+- Services/ (API, storage)
+- ViewModels/ (business logic)
+- Views/ (SwiftUI)
+- Components/ (reusable views)
+
+### Prompt 13.1 (change of mind reflection)
+Actually, let me think about this Swift decision for a sec. It adds complexity for the evaluator (needs Mac/Xcode to test). But I think it's worth it to show I can work with different paradigms beyond JavaScript.
+
+Plus MVVM in Swift will mirror the separation we did in backend. Going ahead with Swift.
+
+### Prompt 14
+Create data models as structs conforming to Codable and Identifiable:
+- Feature with id, title, description, authorName, votesCount, createdAt, updatedAt
+- CreateFeatureRequest, VoteRequest
+
+Important: Use CodingKeys to map Swift camelCase to API's snake_case (author_name, votes_count, created_at, updated_at).
+
+### Prompt 14.1 (question about approach)
+For date parsing - the API returns ISO8601 strings. Should I use a custom DateFormatter or rely on Codable's default? I've had issues with timezone parsing before.
+
+What's the most reliable approach here?
+
+### Prompt 15
+APIService as singleton. Use async/await for all network calls.
+
+Methods: listFeatures(sortBy:), getFeature(id:), createFeature(request:), voteFeature(id:, userIdentifier:).
+
+Create custom APIError enum for: networkError, decodingError, serverError(Int, String), notFound.
+
+Base URL configurable: use localhost for simulator, but document that users need their computer's IP for physical devices.
+
+### Prompt 15.1 (testing issue)
+Hitting localhost from simulator works but I should handle the case where backend is down more gracefully.
+
+Add timeout to URLSession (10 seconds) and retry logic with exponential backoff for network errors. Show user-friendly messages in ViewModels.
+
+### Prompt 16
+UserDefaultsService singleton to generate and persist unique user identifier (UUID). This prevents duplicate votes.
+
+Generate on first launch, store in UserDefaults, retrieve for all vote requests.
+
+### Prompt 17
+ViewModels marked as @MainActor (UI updates on main thread).
+
+FeaturesViewModel: @Published properties for features array, isLoading, errorMessage, sortOption. Methods: loadFeatures(), sortFeatures(), refresh().
+
+CreateFeatureViewModel: Form state, validation, submit method with loading state.
+
+FeatureDetailViewModel: Single feature state, vote method with optimistic update.
+
+### Prompt 17.1 (late discovery)
+Wait, just realized - when a user votes on the detail screen and goes back to the list, the vote count there is stale unless they pull-to-refresh.
+
+Should I use NotificationCenter to notify FeaturesViewModel when a vote happens? Or is there a cleaner SwiftUI way to share state between ViewModels?
+
+### Prompt 18
+SwiftUI Views:
+
+FeaturesListView: NavigationView with List, pull-to-refresh, sort picker in toolbar, loading/error/empty states.
+
+FeatureDetailView: ScrollView with full description, larger vote button, formatted date.
+
+CreateFeatureView: Form in Sheet with TextField validations, submit button disabled while loading.
+
+Use proper state management with @StateObject and @ObservedObject.
+
+### Prompt 19
+Reusable FeatureCardView component:
+- VStack with title (bold, 2 lines max), description (gray, 2 lines), HStack with author badge and vote button
+- Tappable with NavigationLink
+- Match web design: rounded corners, shadow, padding
+
+### Prompt 19.1 (reviewing output)
+Looking at the FeatureCardView - nice layout. But the NavigationLink is wrapping the entire card including the vote button. Won't that trigger navigation when someone tries to vote?
+
+Should we make the vote button a separate tap target that stops propagation?
+
+### Prompt 20
+App entry point FeatureVotingApp.swift with @main.
+
+Configure Info.plist:
+- NSAppTransportSecurity with NSAllowsArbitraryLoads for localhost testing
+- Add note that production should use HTTPS
+
+Target iOS 16+ to use latest SwiftUI features.
+
+## Session 4: Docker & Infrastructure
+
+### Prompt 21
+docker-compose.yml with proper orchestration:
+
+Database: postgres:15-alpine with health check (pg_isready). Volume for persistence.
+
+Backend: depends_on database with health check condition. Port 8000. Environment: DATABASE_URL.
+
+Frontend: depends_on backend. Port 3000. Environment: NEXT_PUBLIC_API_URL.
+
+Shared network. Health checks ensure proper startup order.
+
+### Prompt 21.1 (startup issue)
+Backend is trying to connect to DB before postgres is ready, even with health check. Getting "connection refused" errors on startup.
+
+Add a startup script that waits for postgres to accept connections, then runs migrations, then starts uvicorn. Use wait-for-it.sh or implement retry logic in Python with time.sleep.
+
+### Prompt 21.2 (validation question)
+About the health checks - will docker-compose wait for the health check to pass before starting dependent services, or just wait for the service to start?
+
+Want to make sure backend doesn't start until postgres is actually accepting connections.
+
+### Prompt 22
+.env.example files for each service with all required variables documented.
+
+Also add notes for iOS development:
+- Simulator: use http://localhost:8000
+- Physical device: use http://YOUR_COMPUTER_IP:8000 (find with ifconfig)
+
+### Prompt 23
+Comprehensive .gitignore:
+- Python: __pycache__, *.pyc, venv/, .pytest_cache/
+- Node: node_modules/, .next/, out/
+- iOS: DerivedData/, *.xcuserstate, *.xcworkspace (keep .xcodeproj)
+- Env: .env, .env.local
+- DB: *.db, postgres_data/
+- IDE: .vscode/, .idea/, .DS_Store
+
+## Session 5: Testing & Documentation
+
+### Prompt 24
+Before finishing, let's add tests to prove Clean Architecture is testable.
+
+Backend tests with pytest:
+- test_create_feature_use_case.py: Mock repository, test successful creation and validation errors
+- test_upvote_feature_use_case.py: Test successful vote and duplicate vote prevention
+
+This shows use cases can be tested in isolation without touching database.
+
+### Prompt 24.1 (questioning approach)
+For the mock repository - should I use unittest.mock or create a fake in-memory repository implementation?
+
+Fake repository would be more realistic but takes longer. Which approach is better for demonstrating testing skills?
+
+### Prompt 25
+README.md with:
+- Project overview and architecture diagram (ASCII is fine)
+- Tech stack for each platform (with justifications)
+- Prerequisites
+- Quick start: `docker-compose up` then visit localhost:3000
+- API endpoints with curl examples
+- iOS setup: open Xcode project, update base URL if testing on device
+- Troubleshooting common issues
+
+### Prompt 26
+ARCHITECTURE.md explaining:
+- Clean Architecture layers in backend with dependency flow
+- Why we separated domain from infrastructure
+- Atomic Design in frontend with component hierarchy
+- MVVM in iOS and how it mirrors backend separation
+- Data flow: User → View → ViewModel → Service → API → Backend
+- Key patterns: Dependency Injection, Repository, DTO, Adapter
+- Database schema with relationships
+- Security: user_identifier for voting, CORS config, input validation
+
+### Prompt 26.1 (reflection on architecture)
+Reading the architecture doc - should add a section on trade-offs. Clean Architecture adds complexity for a small app like this, but demonstrates enterprise patterns.
+
+Add "When to Use" section explaining this pattern shines with multiple developers, changing requirements, and long-term maintenance. For a solo project or MVP, simpler structure might be better.
+
+This shows I'm not just applying patterns blindly.
+
+### Prompt 27
+QUICKSTART.md for evaluators:
+1. `docker-compose up` (wait 30 seconds)
+2. Visit localhost:3000
+3. Create a feature, upvote it
+4. Check API docs at localhost:8000/docs
+5. iOS: Open in Xcode, update URL in APIService if needed, run on simulator
+
+Include curl commands to test API directly.
+
+Common issues: ports already in use, docker not running, iOS signing requirements.
